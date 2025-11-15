@@ -1,0 +1,500 @@
+{
+  "name": "Logs Analyzer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "slack-logs",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-node",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        1184,
+        96
+      ],
+      "webhookId": "4b62e43b-2b70-4f73-8615-abea0faaf3aa"
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = $input.first().json.body.text || '';\nconst params = text.trim().split(/\\s+/);\n\nconst uuid = params[0];\n\n// Validate and parse date parameter (must be yyyyMMdd format with 8 digits)\nlet dateParam = params[1];\nif (!dateParam || !/^\\d{8}$/.test(dateParam)) {\n  // Use current date if not provided or invalid\n  const now = new Date();\n  const year = now.getFullYear();\n  const month = String(now.getMonth() + 1).padStart(2, '0');\n  const day = String(now.getDate()).padStart(2, '0');\n  dateParam = `${year}${month}${day}`;\n}\n\nconst entorno = params[2] || 'sta';\n\nconst projectId = entorno === 'prod' ? 'mm-provision-osp-prod' : 'mm-provision-osp-sta';\nconst dataset = entorno === 'prod' ? 'provision_osp_prod_containers_logs' : 'provision_osp_sta_containers_logs';\nconst tableName = `stdout_${dateParam}`;\n\n// Extract user_id from Slack payload\nconst userId = $input.first().json.body.user_id;\n\n// Create channel name (Slack channel names must be lowercase, no special chars except - and _)\nconst channelName = `logs-${uuid.substring(0, 8)}-${dateParam}-${entorno}`.toLowerCase();\n\nreturn {\n  json: {\n    uuid: uuid,\n    date: dateParam,\n    entorno: entorno,\n    projectId: projectId,\n    dataset: dataset,\n    tableName: tableName,\n    user_id: userId,\n    channel_name: channelName,\n    response_url: $input.first().json.body.response_url\n  }\n};"
+      },
+      "id": "parse-params-node",
+      "name": "Parse Parameters",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1632,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "projectId": "={{ $('Parse Parameters').item.json.projectId }}",
+        "sqlQuery": "SELECT\n  timestamp,\n  jsonPayload.metadata.workflowtype,\n  jsonPayload.metadata.activitytype,\n  jsonPayload.message,\n  httpRequest.requestUrl,\n  jsonPayload.requestBody.content AS request,\n  jsonPayload.responseBody.content AS response,\n  httpRequest.status\nFROM\n  `{{ $('Parse Parameters').item.json.projectId }}.{{ $('Parse Parameters').item.json.dataset }}.{{ $('Parse Parameters').item.json.tableName }}`\nWHERE\n  jsonPayload.loggername != 'org.hibernate.SQL'\n  AND ( jsonPayload.message LIKE '%{{ $('Parse Parameters').item.json.uuid }}%'\n    OR jsonPayload.metadata.workflowId LIKE '{{ $('Parse Parameters').item.json.uuid }}%' )\nORDER BY\n  timestamp ASC",
+        "options": {}
+      },
+      "id": "bigquery-node",
+      "name": "BigQuery",
+      "type": "n8n-nodes-base.googleBigQuery",
+      "typeVersion": 2.1,
+      "position": [
+        1648,
+        384
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "FLqd0tyRCbMn1TwM",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const logs = JSON.stringify($input.all(), null, 2);\n\nconst prompt = `Analyze the following BigQuery logs from a provisioning workflow execution.\n\nIMPORTANT: Structure your response with the analysis first, then separate each JSON with \"###JSON###\".\n\nFormat rules for ANALYSIS section:\n- Use *bold*, _italic_ for emphasis where needed\n- Emojis: 🚀 ✅ ❌ ⚠️ 🔍 📊\n\nStructure EXACTLY:\n\n*🚀 SUMMARY*\nResume the execution status, process times and representative information\n\n*🔍 EXECUTION FLOW*\nStructure references to external system calls, with exceptions and success messages if any\n\n*🏗️ TMF ANALYSIS*\nAnalyze input JSON and describe hierarchy of TMF format items and accounts. Include graphical representation with hints of JSON structure intent\n\n*⚠️ KENAN ANALYSIS*\nAnalyze Kenan multiple service invocations payloads and describe the accounts and elements being processed\n\n###JSON###\n*📄 TMF ORDER JSON*\n{...complete TMF order JSON formatted and indented...}\n\n###JSON###\n*📄 KENAN REQUEST #n*\n{...complete kenan request JSON formatted and indented...}\n\n###JSON###\n*📄 KENAN RESPONSE #n*\n{...complete kenan response JSON formatted and indented...}\n\nRepeat for each Kenan call. DO NOT use \\`\\`\\`json tags, just output the raw JSON.\n\nFollow a strict order of the sections, do not mix them.\n\nHere are the logs:\n${logs}`;\n\nreturn {\n  json: {\n    prompt: prompt,\n    channel_id: $('Send Initial Message').first().json.channel\n  }\n};"
+      },
+      "id": "build-prompt-node",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"contents\": [{ \"parts\": [{ \"text\": $json.prompt }] }] } }}",
+        "options": {}
+      },
+      "id": "call-gemini-api-node",
+      "name": "Call Gemini API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2096,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst generatedText = response.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated';\nconst channelId = $('Build Prompt').first().json.channel_id;\n\n// Split by JSON separator\nconst parts = generatedText.split('###JSON###').map(s => s.trim()).filter(s => s.length > 0);\n\n// First part is the analysis, rest are JSON sections\nconst results = [];\n\nfor (let i = 0; i < parts.length; i++) {\n  results.push({\n    json: {\n      text: parts[i],\n      channel_id: channelId,\n      section_number: i + 1,\n      total_sections: parts.length,\n      is_json_section: i > 0\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "extract-gemini-response-node",
+      "name": "Extract Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "⏳ Analizando logs... Los resultados se publicarán en breve.",
+        "options": {}
+      },
+      "id": "respond-webhook-node",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1408,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  let text = item.json.text;\n  const channelId = item.json.channel_id;\n  const sectionNum = item.json.section_number;\n  const isJsonSection = item.json.is_json_section;\n\n  // Remove any ```json or ``` markers from the text\n  text = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '');\n\n  const blocks = [];\n\n  if (isJsonSection) {\n    // This is a JSON section - extract title and JSON\n    const lines = text.split('\\n');\n    const title = lines[0].trim();\n    const jsonContent = lines.slice(1).join('\\n').trim();\n    \n    // Add title as markdown\n    blocks.push({\n      type: 'section',\n      text: {\n        type: 'mrkdwn',\n        text: title\n      }\n    });\n    \n    // Add full JSON as rich_text preformatted block\n    blocks.push({\n      type: 'rich_text',\n      elements: [\n        {\n          type: 'rich_text_preformatted',\n          elements: [\n            {\n              type: 'text',\n              text: jsonContent\n            }\n          ]\n        }\n      ]\n    });\n  } else {\n    // This is the analysis section\n    // Split text by code blocks (tables)\n    const parts = text.split(/(```[\\s\\S]*?```)/g);\n    \n    for (const part of parts) {\n      if (!part.trim()) continue;\n      \n      // Check if this is a code block (table)\n      if (part.startsWith('```')) {\n        const tableContent = part.replace(/```\\n?/g, '').trim();\n        \n        // Parse table into Slack fields format\n        const lines = tableContent.split('\\n').filter(l => l.trim() && !l.match(/^[-|]+$/));\n        \n        if (lines.length > 0) {\n          const fields = [];\n          \n          // First line is header\n          const headers = lines[0].split('|').map(h => h.trim()).filter(h => h);\n          \n          // Rest are data rows\n          for (let i = 1; i < lines.length; i++) {\n            const cols = lines[i].split('|').map(c => c.trim()).filter(c => c);\n            \n            // Create field pairs (label: value)\n            for (let j = 0; j < cols.length && j < headers.length; j++) {\n              if (j === 0) {\n                // First column as bold label\n                fields.push({\n                  type: 'mrkdwn',\n                  text: `*${cols[j]}*`\n                });\n              } else {\n                // Other columns as values\n                fields.push({\n                  type: 'mrkdwn',\n                  text: cols[j]\n                });\n              }\n            }\n          }\n          \n          // Split into chunks of 10 fields (Slack limit)\n          for (let i = 0; i < fields.length; i += 10) {\n            const chunk = fields.slice(i, i + 10);\n            blocks.push({\n              type: 'section',\n              fields: chunk\n            });\n          }\n        }\n      } else {\n        // Regular markdown text\n        const maxLength = 2900;\n        if (part.length <= maxLength) {\n          blocks.push({\n            type: 'section',\n            text: {\n              type: 'mrkdwn',\n              text: part.trim()\n            }\n          });\n        } else {\n          // Split large text\n          let remaining = part.trim();\n          while (remaining.length > 0) {\n            let chunk = remaining.substring(0, maxLength);\n            remaining = remaining.substring(maxLength);\n            \n            blocks.push({\n              type: 'section',\n              text: {\n                type: 'mrkdwn',\n                text: chunk\n              }\n            });\n          }\n        }\n      }\n    }\n  }\n\n  results.push({\n    json: {\n      channel_id: channelId,\n      blocks: blocks,\n      section_number: sectionNum,\n      is_json_section: isJsonSection\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "prepare-slack-message-node",
+      "name": "Prepare Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "split-in-batches-node",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1648,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 1
+      },
+      "id": "wait-node",
+      "name": "Wait",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1872,
+        656
+      ],
+      "webhookId": "9718fed8-0106-44bb-8937-8ae1c489a964"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { channel: $json.channel_id, blocks: $json.blocks } }}",
+        "options": {}
+      },
+      "id": "send-http-node",
+      "name": "Send to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2096,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/conversations.create",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { name: $json.channel_name, is_private: false } }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "create-channel-node",
+      "name": "Create Slack Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1856,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/conversations.invite",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { channel: $json.channel_id, users: $json.user_id } }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "invite-user-node",
+      "name": "Invite User to Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/chat.postMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { channel: $('Check Channel Created').item.json.channel_id, text: '⏳ Analizando logs... Los resultados se publicarán en breve.' } }}",
+        "options": {}
+      },
+      "id": "send-initial-message-node",
+      "name": "Send Initial Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1424,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const createResponse = $input.first().json;\nconst channelName = $('Parse Parameters').first().json.channel_name;\nconst slackToken = $env.SLACK_BOT_TOKEN;\n\nlet channelId;\nlet wasCreated = false;\n\nif (createResponse.ok) {\n  channelId = createResponse.channel.id;\n  wasCreated = true;\n} else if (createResponse.error === 'name_taken') {\n  const listResponse = await $http.request({\n    method: 'GET',\n    url: 'https://slack.com/api/conversations.list?types=public_channel&limit=1000',\n    headers: {'Authorization': `Bearer ${slackToken}`}\n  });\n  \n  if (listResponse.ok) {\n    const existingChannel = listResponse.channels.find(ch => ch.name === channelName);\n    if (existingChannel) {\n      channelId = existingChannel.id;\n    } else {\n      throw new Error(`Channel ${channelName} should exist but was not found`);\n    }\n  } else {\n    throw new Error(`Failed to list channels: ${listResponse.error}`);\n  }\n} else {\n  throw new Error(`Failed to create channel: ${createResponse.error}`);\n}\n\nreturn {\n  json: {\n    channel_id: channelId,\n    channel_name: channelName,\n    was_created: wasCreated,\n    user_id: $('Parse Parameters').first().json.user_id\n  }\n};"
+      },
+      "id": "check-channel-node",
+      "name": "Check Channel Created",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        96
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Parameters": {
+      "main": [
+        [
+          {
+            "node": "Create Slack Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BigQuery": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Call Gemini API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Gemini API": {
+      "main": [
+        [
+          {
+            "node": "Extract Gemini Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Gemini Response": {
+      "main": [
+        [
+          {
+            "node": "Prepare Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Slack": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invite User to Channel": {
+      "main": [
+        [
+          {
+            "node": "Send Initial Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Initial Message": {
+      "main": [
+        [
+          {
+            "node": "BigQuery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Slack Channel": {
+      "main": [
+        [
+          {
+            "node": "Check Channel Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Channel Created": {
+      "main": [
+        [
+          {
+            "node": "Invite User to Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "200b772d-e0e2-430f-91eb-8ef0bb77cf7e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "791880d16f6af4697d690afc2fff4f0f0b1c9a00e99d3eda6a13ded411a079c1"
+  },
+  "id": "pI5VIZDiGAataU0N",
+  "tags": []
+}

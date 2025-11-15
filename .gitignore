@@ -1,0 +1,7 @@
+# Datos de n8n (workflows, credentials, configuración)
+docker/data/
+
+# Archivo de configuración local
+docker/.env
+
+mm-provision-osp-sta-*.json
