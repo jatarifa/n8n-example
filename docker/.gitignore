@@ -1,5 +1,0 @@
-# Datos de n8n (workflows, credentials, configuración)
-data/
-
-# Archivo de configuración local
-.env
